@@ -13,16 +13,30 @@ import pdb
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 import torch.optim.sgd
 
+# ======= ======= =======
+# Utilities
+# ======= ======= ====
+
 def is_conv2d_or_linear(layer):
-    """State if `layer` is (`nn.Conv2d` || `nn.Linear`)."""
+    """
+    Return `True` if `layer` is an instance of either `nn.Conv2d` or
+    `nn.Linear`, else `False`.
+    """
     is_conv2d = isinstance(layer, nn.Conv2d)
     return is_conv2d or isinstance(layer, nn.Linear)
 
+def is_apool_or_flatten(layer):
+    """
+    Return `True` if `layer` is an instance of either `nn.AvgPool2d` or
+    `nn.Flatten`, else `False`.
+    """
+    is_apool = isinstance(layer, nn.AvgPool2d)
+    return is_apool or isinstance(layer, nn.Flatten)
+
 def is_nonetype(obj):
-    """Check if an object has the same type as `None`."""
+    """`True` if an object has the same type as `None` else `False`."""
 
     # Implemented here exactly the way the original authors implemented
     # it, because I was unsure what reason they had to check the two
@@ -32,31 +46,40 @@ def is_nonetype(obj):
     # `is_nonetype(x)` with the Pythonic `x is None` where possible.
     return type(obj) == type(None)
 
-def no_mm_support(layer_type):
+def clamp_grad(obj, grad_clip):
+    """Clamp gradients to plus-or-minus the clip value.
+
+    Clamps an object's gradients to the range
+    [-|grad_clip|, +|grad_clip|]. Object must have attribute `grad`.
     """
-    Throw an exception alerting the user a layer type
-    they tried to use is not supported for multi-models.
-    """
-    if model_type == "multi":
-        raise NotImplementedError(
-            f"layer type '{layer_type}' currently unsupported "
-            + f"for multi-models"
-        )
+    abs_gc = abs(grad_clip)
+    obj.grad = torch.clamp(obj.grad, -abs_gc, abs_gc)
+
+# ======= ======= =======
+# Model Definition
+# ======= ======= ====
 
 class ListSNNMulti(nn.Module):
-    """simple spiking neural network (SNN) model without SNNCell"""
+    """Simple spiking neural network (SNN) model without SNNCell"""
 
-    def __init__(self, model_config):
-        super(ListSNNMulti, self).__init__()
-        print("SNNmodel_parallel instantiated")
-        if hasattr(model_config, "__dict__"):
-            self.__dict__.update(model_config.__dict__)
-        else:
-            self.__dict__.update(model_config)
-        if not self.multi_model:
-            assert self.num_models == 1
-        self._init_kernels()
-        self._init_layers()
+    # ======= ======= =======
+    # Utilities
+    # ======= ======= ====
+
+    def no_mm_support(self, layer_type):
+        """
+        Throw an exception alerting the user a layer type they tried to
+        use is not supported for multi-models.
+        """
+        if self.multi_model:
+            raise NotImplementedError(
+                f"layer type '{layer_type}' currently unsupported for " +
+                "multi-models"
+            )
+
+    # ======= ======= =======
+    # Initialization
+    # ======= ======= ====
 
     def _init_kernels(self):
         """Initialize kernels as attributes."""
@@ -146,12 +169,12 @@ class ListSNNMulti(nn.Module):
             # Format B: iterable
             in_channels = int(self.network_size[0])
 
-        def _init_single_layer(layer_spec, model_type="single"):
+        def _init_single_layer(layer_spec):
             """Initialize a single layer from a specification."""
 
             # Build convolutional layer according to specification
             if "conv" in layer_spec:
-                no_mm_support("conv")  # unsupported for multi-models
+                self.no_mm_support("conv")  # unsupported for multi-models
                 out_channels, kernel_size = [
                     int(item) for item in layer_spec.strip("conv").split("c")
                 ]
@@ -187,7 +210,7 @@ class ListSNNMulti(nn.Module):
 
             # Build average-pool layer according to specification
             elif "apool" in layer_spec:
-                no_mm_support("apool")  # unsupported for multi-models
+                self.no_mm_support("apool")  # unsupported for multi-models
                 pool_size = int(layer_spec.strip("apool"))
 
                 # layer
@@ -205,7 +228,7 @@ class ListSNNMulti(nn.Module):
 
             # Build max-pool layer according to specification
             elif "mpool" in layer_spec:
-                no_mm_support("mpool")  # unsupported for multi-models
+                self.no_mm_support("mpool")  # unsupported for multi-models
                 pool_size = int(layer_spec.strip("mpool"))
 
                 # layer
@@ -248,7 +271,7 @@ class ListSNNMulti(nn.Module):
                 for l, layer_spec in enumerate(self.network_size[1:]):
                     # Initialize layer
                     layer, bias, fmap_shape, fmap_type = _init_single_layer(
-                        layer_spec, "multi"
+                        layer_spec
                     )
                     # Bookkeep
                     if m == 0:
@@ -260,13 +283,12 @@ class ListSNNMulti(nn.Module):
                         self.layers[l].append(layer)
                         self.state_v_bs[l].append(bias)
 
-                # ?
-                setattr(
+                setattr(  # make each layer an attribute
                     self,
                     f"m{m}_layers_module",
                     nn.ModuleList([layers[m] for layers in self.layers]),
                 )
-                setattr(
+                setattr(  # make all state_v_bs parameters attributes
                     self,
                     f"m{m}_state_v_bs_param",
                     nn.ParameterList([v_b[m] for v_b in self.state_v_bs]),
@@ -282,44 +304,70 @@ class ListSNNMulti(nn.Module):
                 self.fmap_shape_list.append(fmap_shape)
                 self.fmap_type_list.append(fmap_type)
 
-            # ?
+            # Make layers and state_v_bs parameters model attributes
             self.layers_module = nn.ModuleList(self.layers)
             self.state_v_bs_param = nn.ParameterList(self.state_v_bs)
 
         self.reset_parameters()
 
+    def __init__(self, model_config):
+        """Instantiate model."""
+        super(ListSNNMulti, self).__init__()
+        print("SNNmodel_parallel instantiated")
+        if hasattr(model_config, "__dict__"):
+            self.__dict__.update(model_config.__dict__)
+        else:
+            self.__dict__.update(model_config)
+        if not self.multi_model and self.num_models != 1:
+            raise ValueError(
+                "must set multi-model flag as True when num_models > 1"
+            )
+        self._init_kernels()
+        self._init_layers()
+
+    # ======= ======= =======
+    # Forward Pass
+    # ======= ======= ====
+
     def _init_param_grads(self):
+        """Initialize weight and bias gradients."""
         self.weight_grad = list()
         self.bias_grad = list()
         for l, layers in enumerate(self.layers):
-            if self.multi_model:
-                layer = layers[0]
-            else:
-                layer = layers
+            # Make sure layer selection is appropriate to model type
+            layer = layers[0] if self.multi_model else layers
 
+            # Layers which are fully connected or convolutional have
+            # weight and bias gradients
             if self.fmap_type_list[l] in ["fc", "conv"]:
+                # Weight and bias gradients are initialized to zero
                 if self.multi_model:
-                    zeros_w = torch.zeros(
-                        [self.num_models, *layer.weight.size()], requires_grad=False
-                    )
-                    zeros_b = torch.zeros([self.num_models, *self.fmap_shape_list[l]])
+                    wshape = [self.num_models, *layer.weight.size()]
+                    bshape = [self.num_models, *self.fmap_shape_list[l]]
                 else:
-                    zeros_w = torch.zeros(layer.weight.size(), requires_grad=False)
-                    zeros_b = torch.zeros(self.fmap_shape_list[l])
+                    wshape = layer.weight.size()
+                    bshape = self.fmap_shape_list[l]
+
+                zeros_w = torch.zeros(wshape, requires_grad=False)
+                zeros_b = torch.zeros(bshape)
+
                 self.weight_grad.append(zeros_w)
                 self.bias_grad.append(zeros_b)
+
+            # Layers which are not fully connected or convolutional
+            # lack weight and bias gradients
             else:
                 self.weight_grad.append(None)
                 self.bias_grad.append(None)
 
     def reset_parameters(self):
-        """Reset all layer parameters in single- and multi- models."""
+        """Reset all layers' parameters."""
 
         def reset_parameters_single_layer(layer, state_v_bs):
             """Reset an individual layer's parameters."""
 
-            # The following operations are only valid for `nn.Conv2d`
-            # and/or `nn.Linear` layers
+            # The following operations are only valid for linear and/or
+            # convolutional layers
             if not is_conv2d_or_linear(layer, state_v_bs):
                 return
 
@@ -419,6 +467,7 @@ class ListSNNMulti(nn.Module):
 
                     # Convolutional or linear
                     if is_conv2d_or_linear(layer):
+                        # Eq. (2)
                         if l == 0:
                             if self.multi_model:
                                 state_i = torch.bmm(
@@ -456,14 +505,12 @@ class ListSNNMulti(nn.Module):
                             self.state_i[l].append(
                                 layer(self.state_s[l - 1][-1]) * self.beta_i
                             )
-
                         if t != 0:
-                            self.state_i[l][-1] += (
-                                self.state_i[l][t - 1]
-                                * (1 - self.state_s[l][-1])
-                                * self.alpha_i
-                            )
+                            idelta = self.alpha_i * self.state_i[l][t - 1]
+                            idelta *= (1 - self.state_s[l][-1])
+                            self.state_i[l][-1] += idelta
 
+                        # Eq. (1)
                         if self.multi_model:
                             state_i = self.state_i[l][-1]
                             state_i_rs = state_i.reshape(
@@ -471,28 +518,30 @@ class ListSNNMulti(nn.Module):
                                 int(state_i.shape[0] / self.num_models),
                                 *state_i.shape[1:],
                             )
-                            state_v = (
-                                state_i_rs * self.beta_v
-                                + self.bias_list[l] * self.beta_bias
-                            )
+                            state_v = state_i_rs * self.beta_v
+                            state_v += self.bias_list[l] * self.beta_bias
                             self.state_v[l].append(
                                 state_v.reshape(
                                     state_v.shape[0] * state_v.shape[1],
                                     *state_v.shape[2:],
                                 )
                             )
-                        elif len(self.state_i[l][-1].shape) == 4:
-                            self.state_v[l].append(
-                                self.state_i[l][-1] * self.beta_v
-                                + self.state_v_bs[l].view(-1, 1, 1) * self.beta_bias
-                            )
-                        elif len(self.state_i[l][-1].shape) == 2:
-                            self.state_v[l].append(
-                                self.state_i[l][-1] * self.beta_v
-                                + self.state_v_bs[l] * self.beta_bias
-                            )
+
                         else:
-                            raise ValueError("Something's wrong.")
+                            rank = len(self.state_i[l][-1].shape)
+                            if rank == 2:
+                                state_v = self.state_v_bs[l]
+                            elif rank == 4:
+                                state_v = self.state_v_bs[l].view(-1, 1, 1)
+                            else:
+                                raise ValueError(
+                                    "expected multi-model or model with " +
+                                    "rank(I) in {2, 4}, found singular " +
+                                    f"model with rank(I) of {rank}"
+                                )
+                            state_v *= self.beta_bias
+                            state_v += self.state_i[l][-1] * self.beta_v
+                            self.state_v[l].append(state_v)
 
                         if t != 0:
                             self.state_v[l][-1] += (
@@ -500,21 +549,22 @@ class ListSNNMulti(nn.Module):
                                 * (1 - self.state_s[l][-1])
                                 * self.alpha_v
                             )
-                            self.state_v_prime[l].append(
-                                self.state_v[l][-1] - self.state_v[l][-2] * (1 - self.state_s[l][-1])
-                            )
+
+                            state_v_prime = (-1) * self.state_v[l][-2]
+                            state_v_prime *= (1 - self.state_s[l][-1])
+                            state_v_prime += self.state_v[l][-1]
+
+                            self.state_v_prime[l].append(state_v_prime)
                         else:
                             self.state_v_prime[l].append(self.state_v[l][-1])
+
                         self.state_v_prime[l][-1] = torch.clamp(
                             self.state_v_prime[l][-1], min=1e-2
                         )
-
                         self.state_s[l].append(self.act(self.state_v[l][-1]))
 
                     # Average pooling or flattening
-                    elif isinstance(layer, nn.AvgPool2d) or isinstance(
-                        layer, nn.Flatten
-                    ):
+                    elif is_apool_or_flatten(layer):
                         # It is assumed that the first layer is always
                         # conv or fc.
                         if l == 0:
@@ -552,6 +602,10 @@ class ListSNNMulti(nn.Module):
             self.calc_num_spike()
 
         return self.output
+
+    # ======= ======= =======
+    # Loss
+    # ======= ======= ====
 
     def calc_loss(self, target, calc_spike_loss=False):
         """Loss function."""
@@ -780,34 +834,38 @@ class ListSNNMulti(nn.Module):
         return output
 
     def clean_state(self):
-        """Reset network object."""
-        self.input = None
-        self.target = None
-        self.output = None
-        self.output_each_model = None
-        self.output_s_cum = None
+        """Reset network."""
+        self.input = None              #
+        self.target = None             #
+        self.output = None             #
+        self.output_each_model = None  #
+        self.output_s_cum = None       # cumulative spike output
 
-        self.weight_list = None
-        self.bias_list = None
-        self.weight_grad = None
-        self.bias_grad = None
+        self.weight_list = None  #
+        self.bias_list = None    #
+        self.weight_grad = None  #
+        self.bias_grad = None    #
 
-        self.state_i = None
-        self.state_v = None
-        self.state_v_prime = None
-        self.state_s = None
+        self.state_i = None        # I: synaptic current
+        self.state_v = None        # V: membrane voltage/potential
+        self.state_v_prime = None  #
+        self.state_s = None        # S: spikes (binary)
 
-        self.state_i_grad = None
-        self.state_v_grad = None
-        self.state_v_dep_grad = None
-        self.state_s_grad = None
-        self.state_t_grad = None
-        self.state_v_grad_epr_ef1 = None
-        self.state_v_grad_epr_ef2 = None
-        self.dLdS = None
-        self.dLdT = None
+        self.state_i_grad = None          #
+        self.state_v_grad = None          #
+        self.state_v_dep_grad = None      #
+        self.state_s_grad = None          #
+        self.state_t_grad = None          #
+        self.state_v_grad_epr_ef1 = None  #
+        self.state_v_grad_epr_ef2 = None  #
+        self.dLdS = None                  # loss gradient wrt spiking
+        self.dLdT = None                  # loss gradient wrt timing
 
-        gc.collect()
+        gc.collect()  # run garbage collector
+
+    # ======= ======= =======
+    # Backward Pass
+    # ======= ======= ====
 
     def _init_backward(self):
         """Prepare network for gradient computation."""
@@ -874,6 +932,81 @@ class ListSNNMulti(nn.Module):
                 if self.state_v_grad_epr_ef2 is not None:
                     self.state_v_grad_epr_ef2.append(None)
 
+    def calc_and_set_dLdS(self):
+        """Calculate the gradient of the loss wrt spiking."""
+
+        # Case 1: latency target
+        if self.target_type == "latency":
+            self.dLdS = (
+                torch.zeros(self.batch_size, *self.fmap_shape_list[-1])
+                .scatter_(1, target.view(-1, 1), -self.L_nospike_per_batch)
+                .repeat(self.term_length, 1, 1)
+            )
+            # time x batch x neuron
+            return
+
+        # Case 2: train or count target
+        if self.target_type == "train":
+            dLdS = self.apply_alpha_kernel(
+                self.diff, padding=False, flip=False
+            )
+        elif self.target_type == "count":
+            # bc alpha_exp = 1 here, alpha kernel application
+            # is reduced to the following (I think that's what
+            # the original code comment meant)
+            dLdS = self.diff[:, -1, :].view(self.batch_size, 1, -1)
+            dLdS = dLdS.repeat(1, self.time_length, 1)
+
+        dLdS *= 2 / (self.time_length * self.batch_size)
+
+        if self.multi_model:
+            dLdS *= self.num_models
+
+        # Reshape to [time, batch, neuron]
+        self.dLdS = dLdS.permute(1, 0, 2)
+
+    def calc_and_set_dLdT(self):
+        """Calculate the gradient of the loss wrt timings."""
+
+        # Case 1: latency target
+        if self.target_type == "latency":
+            dLdT = torch.zeros(
+                self.term_length, self.batch_size, *self.fmap_shape_list[-1]
+            )
+            self.sm_grad = self.sm_inp.grad
+            self.sm_grad[self.tl_m_tf == 0] = 0
+            idxs = torch.clamp(
+                self.term_length - self.tl_m_tf, 0, self.term_length - 1
+            ).long()
+            self.dLdT = dLdT.scatter_(
+                0,
+                idxs.unsqueeze(0),
+                self.sm_grad.unsqueeze(0) * (-self.softmax_beta),
+            )
+            return  # time x batch x neuron
+
+        # Case 2: train or count target
+        if self.target_type == "train":
+            dLdT_raw = self.apply_alpha_kernel(
+                self.diff, flip=False, prime=True
+            )
+            idx1 = self.alpha_kernel_prime.numel() - 2
+            idx2 = idx1 + self.time_length
+
+            dLdT_raw = dLdT_raw[:, idx1:idx2, :,]
+            dLdT_raw *= (-2) / (self.time_length * self.batch_size)
+            # time x batch x neuron
+        elif self.target_type == "count":
+            dLdT_raw = torch.zeros(self.output.shape)
+
+        if self.multi_model:
+            dLdT_raw *= self.num_models
+
+        dLdT = self.output * dLdT_raw
+        # Reshape to [time, batch, neuron]
+        self.dLdT_raw = dLdT_raw.permute(1, 0, 2)
+        self.dLdT = dLdT.permute(1, 0, 2)
+
     def backward_custom(self, target, epoch=0):
         """
         Calculate gradient of each parameters.
@@ -911,110 +1044,28 @@ class ListSNNMulti(nn.Module):
             # Make sure output and target shapes match
             if self.output.shape != target.shape:
                 raise Exception(
-                    "output/target shape mismatch: "
-                    + f"{self.output.shape} vs {target.shape}"
+                    f"output/target shape mismatch: {self.output.shape} vs " +
+                    f"{target.shape}"
                 )
-
             with torch.no_grad():
                 # batch_size, num_time_step, num_features = self.output.shape
                 self.calc_loss(target)
-
-                ### Getting dLdS (gradient wrt binary spikes).
-                if self.target_type == "train":
-                    dLdS = self.apply_alpha_kernel(
-                        self.diff, padding=False, flip=False
-                    )
-                elif self.target_type == "count":
-                    # bc alpha_exp = 1 here, alpha kernel application
-                    # is reduced to the following (I think that's what
-                    # the original code comment meant)
-                    dLdS = self.diff[:, -1, :].view(self.batch_size, 1, -1)
-                    dLdS = dLdS.repeat(1, self.time_length, 1)
-
-                dLdS *= 2 / (self.time_length * self.batch_size)
-
-                if self.multi_model:
-                    dLdS *= self.num_models
-
-                # Reshape to [time, batch, neuron]
-                self.dLdS = dLdS.permute(1, 0, 2)
-
-                ### Getting dLdT.
-                if self.target_type == "train":
-                    dLdT_raw = self.apply_alpha_kernel(
-                        self.diff, flip=False, prime=True
-                    )
-                    idx1 = self.alpha_kernel_prime.numel() - 2
-                    idx2 = idx1 + self.time_length
-
-                    dLdT_raw = dLdT_raw[:, idx1:idx2, :,]
-                    dLdT_raw *= (-2) / (self.time_length * self.batch_size)
-                    # time x batch x neuron
-                elif self.target_type == "count":
-                    dLdT_raw = torch.zeros(self.output.shape)
-
-                if self.multi_model:
-                    dLdT_raw *= self.num_models
-
-                dLdT = self.output * dLdT_raw
-                # Reshape to [time, batch, neuron]
-                self.dLdT_raw = dLdT_raw.permute(1, 0, 2)
-                self.dLdT = dLdT.permute(1, 0, 2)
+                self.calc_and_set_dLdS()
+                self.calc_and_set_dLdT()
 
         elif self.target_type == "latency":
-
             if self.output.shape[0] != target.shape[0]:
                 raise Exception(
-                    "output/target shape mismatch: "
-                    + f"{self.output.shape[0]} vs {target.shape[0]}"
+                    f"output/target shape mismatch: {self.output.shape[0]} " +
+                    f"vs {target.shape[0]}"
                 )
-
             self.calc_loss(target)
             with torch.no_grad():
-                self.dLdS = (
-                    torch.zeros(self.batch_size, *self.fmap_shape_list[-1])
-                    .scatter_(1, target.view(-1, 1), -self.L_nospike_per_batch)
-                    .repeat(self.term_length, 1, 1)
-                )
-                # time x batch x neuron
-
-                dLdT = torch.zeros(
-                    self.term_length, self.batch_size, *self.fmap_shape_list[-1]
-                )
-                self.sm_grad = self.sm_inp.grad
-                self.sm_grad[self.tl_m_tf == 0] = 0
-                idxs = torch.clamp(
-                    self.term_length - self.tl_m_tf, 0, self.term_length - 1
-                ).long()
-                self.dLdT = dLdT.scatter_(
-                    0,
-                    idxs.unsqueeze(0),
-                    self.sm_grad.unsqueeze(0) * (-self.softmax_beta),
-                )
-                # time x batch x neuron
+                self.calc_and_set_dLdS()
+                self.calc_and_set_dLdT()
 
         # Add and clip gradients
         with torch.no_grad():
-
-            def clip_gradients(layer, state_v_bs, grad_clip):
-                """
-                Clamp a layer's weight and state_v_bs gradients to the
-                range [-|grad_clip|, +|grad_clip|] (via side effects).
-                """
-
-                # Operation only applicable to Conv2d or Linear layer
-                if not is_conv2d_or_linear(layer):
-                    return
-
-                abs_gc = abs(grad_clip)
-
-                layer.weight.grad = torch.clamp(
-                    layer.weight.grad, -abs_gc, abs_gc
-                )
-                state_v_bs.grad = torch.clamp(
-                    state_v_bs.grad, -abs_gc, abs_gc
-                )
-
 
             # As per Kim et al. (2020), three learning rules classes
             # are supported for the sake of comparison: activation,
@@ -1051,18 +1102,20 @@ class ListSNNMulti(nn.Module):
                             idx = m // (self.num_models // len(grad_clip))
                             grad_clip = grad_clip[idx]
 
-                        # Clip the model's gradients
-                        clip_gradients(
-                            layer[m], self.state_v_bs[l][m], grad_clip
-                        )
+                        # Clamp gradients to [-grad_clip, +grad_clip]
+                        if is_conv2d_or_linear(layer):
+                            clamp_grad(layer[m].weight, grad_clip)
+                            clamp_grad(self.state_v_bs[l][m], grad_clip)
                 else:
                     # When given a list of gradients clips for a single
                     # model, just use the first element
                     if type(grad_clip) == list:
                         grad_clip = grad_clip[0]
 
-                    # Clip the model's gradients
-                    clip_gradients(layer, self.state_v_bs[l], grad_clip)
+                    # Clamp gradients to [-grad_clip, +grad_clip]
+                    if is_conv2d_or_linear(layer):
+                        clamp_grad(layer.weight, grad_clip)
+                        clamp_grad(self.state_v_bs[l], grad_clip)
 
     def gradAdd(self, output_grad_extrn, lrule, scale=1.0):
         """Update weight and bias gradients in the network."""
@@ -1195,44 +1248,58 @@ class ListSNNMulti(nn.Module):
             self.prop_dLdI_to_dLdW("SRM", True)
 
     def bpANTLR(self, output_grad_extrn):  # timing + SRM (not RNN)
+        """
+        Perform the ANTLR computation for each layer across time.
+        """
+        def bpANTLR_single_layer(layer_idx, timestep):
+            """
+            Perform the ANTLR computation for a single layer at a
+            single point in time.
+            """
+            l = layer_idx
+            t = timestep
+
+            ###### dL/dT[t], dL/dS[t] from upper layer
+            if l == self.num_layer - 1:
+                self.state_t_grad[l][t] = output_grad_extrn[0][t]
+                self.state_s_grad[l][t] = output_grad_extrn[1][t]
+            elif self.fmap_type_list[l + 1] in ["fc", "conv"]:
+                ###### dL/dT[t] from upper layer dL/dV[t]
+                self.tprop_dLdV_to_dLdT(t, l)
+                ###### dL/dS[t] from upper layer dL/dV[t]
+                self.prop_dLdI_to_dLdX(t, l, X="S")
+            else:
+                # For pooling & flatten
+                self.prop_dLdX_to_dLdX(t, l, X="T")
+                self.prop_dLdX_to_dLdX(t, l, X="S")
+
+            if self.fmap_type_list[l] in ["fc", "conv"]:
+                ###### dL/dV[t] from dL/dT[t], dLdS[t]
+                effective_input = self.state_s[l][t] == 1
+
+                act_vgrad = self.surr_deriv(self.state_v[l][t])
+                act_vgrad *= self.state_s_grad[l][t]
+
+                tim_vgrad = torch.zeros(self.state_t_grad[l][t].shape)
+                tim_vgrad[effective_input] = (
+                    self.state_t_grad[l][t][effective_input]
+                    / -self.state_v_prime[l][t][effective_input]
+                )
+
+                self.state_v_grad[l][t] = self.lambda_act * act_vgrad
+                self.state_v_grad[l][t][effective_input] += (
+                    self.lambda_timing * tim_vgrad[effective_input]
+                )
+
+                ###### dL/dI[t] from dL/dV[t]
+                self.prop_dLdV_to_dLdI("SRM", t, l)
+
         # output_grad_extrn: 2 (dLdT, dLdS) x time x batch x neuron
         with torch.no_grad():
             for t in range(self.term_length - 1, -1, -1):
                 for l in range(self.num_layer - 1, -1, -1):
-                    ###### dL/dT[t], dL/dS[t] from upper layer
-                    if l == self.num_layer - 1:
-                        self.state_t_grad[l][t] = output_grad_extrn[0][t]
-                        self.state_s_grad[l][t] = output_grad_extrn[1][t]
-                    elif self.fmap_type_list[l + 1] in ["fc", "conv"]:
-                        ###### dL/dT[t] from upper layer dL/dV[t]
-                        self.tprop_dLdV_to_dLdT(t, l)
-                        ###### dL/dS[t] from upper layer dL/dV[t]
-                        self.prop_dLdI_to_dLdX(t, l, X="S")
-                    else:
-                        # For pooling & flatten
-                        self.prop_dLdX_to_dLdX(t, l, X="T")
-                        self.prop_dLdX_to_dLdX(t, l, X="S")
+                    bpANTLR_single_layer(l, t)
 
-                    if self.fmap_type_list[l] in ["fc", "conv"]:
-                        ###### dL/dV[t] from dL/dT[t], dLdS[t]
-                        effective_input = self.state_s[l][t] == 1
-
-                        act_vgrad = (
-                            self.surr_deriv(self.state_v[l][t])
-                            * self.state_s_grad[l][t]
-                        )
-                        tim_vgrad = torch.zeros(self.state_t_grad[l][t].shape)
-                        tim_vgrad[effective_input] = (
-                            self.state_t_grad[l][t][effective_input]
-                            / -self.state_v_prime[l][t][effective_input]
-                        )
-                        self.state_v_grad[l][t] = self.lambda_act * act_vgrad
-                        self.state_v_grad[l][t][effective_input] += (
-                            self.lambda_timing * tim_vgrad[effective_input]
-                        )
-
-                        ###### dL/dI[t] from dL/dV[t]
-                        self.prop_dLdV_to_dLdI("SRM", t, l)
             self.prop_dLdI_to_dLdW("SRM")
             ###### timing weight not used
 
@@ -1270,7 +1337,7 @@ class ListSNNMulti(nn.Module):
                 state_x_grad[l][t] = self.beta_i * x_grad_per_beta_i
             elif self.fmap_type_list[l + 1] == "conv":
 
-                no_mm_support("conv")  # no multi-model support
+                self.no_mm_support("conv")  # no multi-model support
 
                 padding = self.layers[l + 1].padding
                 x_grad_per_beta_i = torch.nn.grad.conv2d_input(
@@ -1352,29 +1419,38 @@ class ListSNNMulti(nn.Module):
             raise ValueError(f"invalid dX in derivative propagation: 'd{X}'")
 
         with torch.no_grad():
-            if "pool" in self.fmap_type_list[l + 1]:
+            fmap_type = self.fmap_type_list[l + 1]
+
+            # Pooling layer
+            if "pool" in fmap_type:
                 kernel_size = self.layers[l + 1].kernel_size
-                if self.fmap_type_list[l + 1] == "apool":
+
+                if fmap_type == "apool":
                     x_grad = F.interpolate(
-                        state_x_grad[l + 1][t], scale_factor=kernel_size
+                        state_x_grad[l + 1][t],
+                        scale_factor=kernel_size
                     )
                     x_grad /= kernel_size * kernel_size
-                elif self.fmap_type_list[l + 1] == "mpool":
+
+                elif fmap_type == "mpool":
                     x_grad = F.max_unpool2d(
                         state_x_grad[l + 1][t],
                         self.layers[l + 1].max_index_list[t],
                         kernel_size=kernel_size,
                         output_size=self.fmap_shape_list[l][1:],
                     )
+
                 if list(x_grad.shape[1:]) != self.fmap_shape_list[l]:
                     to_pad = self.fmap_shape_list[l][-1] - x_grad.shape[-1]
                     x_grad = F.pad(x_grad, (0, to_pad, 0, to_pad), "constant", 0)
                     assert list(x_grad.shape[1:]) == self.fmap_shape_list[l]
+
                 state_x_grad[l][t] = x_grad
-            elif self.fmap_type_list[l + 1] == "flatten":
-                state_x_grad[l][t] = state_x_grad[l + 1][t].view(
-                    state_x_grad[l][t].shape
-                )
+
+            # Flattening layer
+            elif fmap_type == "flatten":
+                shape = state_x_grad[l][t].shape
+                state_x_grad[l][t] = state_x_grad[l + 1][t].view(shape)
 
     def prop_dLdV_to_dLdI(self, style, time, layer):
         with torch.no_grad():
@@ -1384,214 +1460,196 @@ class ListSNNMulti(nn.Module):
             if style == "RNN":
                 ###### dL/dV[t] from next time step (dL/dV[t+1])
                 if t != self.term_length - 1:
-                    self.state_v_grad[l][t] += (
-                        self.alpha_v
-                        * (1 - self.state_s[l][t])
-                        * self.state_v_grad[l][t + 1]
-                    )
+                    x = self.alpha_v * (1 - self.state_s[l][t])
+                    x *= self.state_v_grad[l][t + 1]
+                    self.state_v_grad[l][t] += x
 
                 ###### dL/dI[t] from dL/dV[t]
                 self.state_i_grad[l][t] = self.beta_v * self.state_v_grad[l][t]
 
                 ###### dL/dI[t] from next time step (dL/dI[t+1])
                 if t != self.term_length - 1:
-                    self.state_i_grad[l][t] += (
-                        self.alpha_i
-                        * (1 - self.state_s[l][t])
-                        * self.state_i_grad[l][t + 1]
-                    )
+                    x = self.alpha_i * (1 - self.state_s[l][t])
+                    x *= self.state_i_grad[l][t + 1]
+                    self.state_i_grad[l][t] += x
 
             elif style == "SRM":
                 ###### dL/dV[t] from next time step (dL/dV[t+1])
                 self.state_v_dep_grad[l][t] = self.state_v_grad[l][t]
                 if t != self.term_length - 1:
-                    self.state_v_dep_grad[l][t] += (
-                        self.alpha_v
-                        * (1 - self.state_s[l][t])
-                        * self.state_v_dep_grad[l][t + 1]
-                    )
+                    x = self.alpha_v * (1 - self.state_s[l][t])
+                    x *= self.state_v_dep_grad[l][t + 1]
+                    self.state_v_dep_grad[l][t] += x
 
                 ###### dL/dI[t] from dL/dV[t]
-                self.state_i_grad[l][t] = self.beta_v * self.state_v_dep_grad[l][t]
+                self.state_i_grad[l][t] = self.beta_v
+                self.state_i_grad[l][t] *= self.state_v_dep_grad[l][t]
 
                 ###### dL/dI[t] from next time step (dL/dI[t+1])
                 if t != self.term_length - 1:
-                    self.state_i_grad[l][t] += (
-                        self.alpha_i
-                        * (1 - self.state_s[l][t])
-                        * self.state_i_grad[l][t + 1]
-                    )
+                    x = self.alpha_i * (1 - self.state_s[l][t])
+                    x *= self.state_i_grad[l][t + 1]
+                    self.state_i_grad[l][t] += x
 
             elif style == "SLAYER":
                 ###### dL/dV[t] from next time step (dL/dV[t+1])
                 self.state_v_dep_grad[l][t] = self.state_v_grad[l][t]
                 if t != self.term_length - 1:
-                    self.state_v_dep_grad[l][t] += (
-                        self.alpha_v * self.state_v_dep_grad[l][t + 1]
-                    )
+                    x = self.alpha_v * self.state_v_dep_grad[l][t + 1]
+                    self.state_v_dep_grad[l][t] += x
 
                 ###### dL/dI[t] from dL/dV[t]
-                self.state_i_grad[l][t] = self.beta_v * self.state_v_dep_grad[l][t]
+                self.state_i_grad[l][t] = self.beta_v
+                self.state_i_grad[l][t] *= self.state_v_dep_grad[l][t]
 
                 ###### dL/dI[t] from next time step (dL/dI[t+1])
                 if t != self.term_length - 1:
-                    self.state_i_grad[l][t] += (
-                        self.alpha_i * self.state_i_grad[l][t + 1]
-                    )
+                    x = self.alpha_i * self.state_i_grad[l][t + 1]
+                    self.state_i_grad[l][t] += x
 
             else:
-                raise ValueError("Invalid style name.")
+                raise ValueError(f"invalid style: '{style}'")
 
     def prop_dLdI_to_dLdW(self, style, is_timing=False):
-        """Propogate gradient dLdI back to dLdW.
-
-
-        """
+        """Propogate gradient dLdI back to dLdW."""
 
         with torch.no_grad():
+            term_length = self.term_length
+
             for l in range(self.num_layer):
-                if self.fmap_type_list[l] in ["fc", "conv"]:
-                    # time_length x batch x f_shape
-                    if l == 0:
-                        hidden_s_all = self.input.transpose(0, 1)[: self.term_length]
-                    else:
-                        hidden_s_all = torch.stack(self.state_s[l - 1])
+                if self.fmap_type_list[l] not in ["fc", "conv"]:
+                    continue
 
-                    if style == "RNN":
-                        v_dep_grad = self.state_v_grad[l]
-                    elif style == "SRM" or style == "SLAYER":
-                        v_dep_grad = self.state_v_dep_grad[l]
-                    else:
-                        raise ValueError("Something's wrong.")
+                # time_length x batch x f_shape
+                if l == 0:
+                    hidden_s_all = self.input.transpose(0, 1)[:term_length]
+                else:
+                    hidden_s_all = torch.stack(self.state_s[l - 1])
 
-                    ### Calc weight grad for fc layer.
-                    if self.fmap_type_list[l] == "fc":
+                if style == "RNN":
+                    v_dep_grad = self.state_v_grad[l]
+                elif style == "SRM" or style == "SLAYER":
+                    v_dep_grad = self.state_v_dep_grad[l]
+                else:
+                    raise ValueError(f"invalid style '{style}'")
+
+                ### Calc weight grad for fc layer.
+                if self.fmap_type_list[l] == "fc":
+                    if self.multi_model:
+                        adj_batch_size = self.batch_size // self.num_models
+
+                        hidden_t_m_b_n = hidden_s_all.reshape(
+                            term_length,
+                            self.num_models,
+                            adj_batch_size,
+                            -1,
+                        )
+                        hidden_m_t_b_n = hidden_t_m_b_n.permute(1, 0, 2, 3)
+                        hidden_m_tb_n = hidden_m_t_b_n.reshape(
+                            self.num_models,
+                            term_length * adj_batch_size,
+                            -1,
+                        )
+
+                        igrad_t_m_b_n = self.state_i_grad[l].reshape(
+                            term_length,
+                            self.num_models,
+                            adj_batch_size,
+                            -1,
+                        )
+                        igrad_m_t_b_n = igrad_t_m_b_n.permute(1, 0, 2, 3)
+                        igrad_m_tb_n = igrad_m_t_b_n.reshape(
+                            self.num_models,
+                            term_length * adj_batch_size,
+                            -1,
+                        )
+                        igrad_m_n_tb = igrad_m_tb_n.permute(0, 2, 1)
+                        self.weight_grad[l] = self.beta_i * torch.bmm(
+                            igrad_m_n_tb, hidden_m_tb_n
+                        )
+                    else:
+                        self.weight_grad[l] = self.beta_i * torch.mm(
+                            self.state_i_grad[l]
+                            .reshape(-1, self.state_i_grad[l].shape[-1])
+                            .t(),
+                            hidden_s_all.reshape(-1, hidden_s_all.shape[-1]),
+                        )
+
+                    if is_timing:
+                        # Calculate timing penalty coefficient
                         if self.multi_model:
-                            hidden_t_m_b_n = hidden_s_all.reshape(
-                                self.term_length,
+                            fan_in = self.weight_grad[l].shape[2]
+                        else:
+                            fan_in = self.weight_grad[l].shape[1]
+
+                        timing_penalty_coeff = self.timing_penalty / fan_in
+
+                        # ...
+                        no_spike = torch.stack(self.state_s[l]).sum(dim=0) > 0
+                        no_spike = 1 - no_spike.float()
+                        if self.multi_model:
+                            # model_batch x fan_out
+                            no_spike = no_spike.reshape(
                                 self.num_models,
                                 int(self.batch_size / self.num_models),
                                 -1,
                             )
-                            hidden_m_t_b_n = hidden_t_m_b_n.permute(1, 0, 2, 3)
-                            hidden_m_tb_n = hidden_m_t_b_n.reshape(
-                                self.num_models,
-                                self.term_length
-                                * int(self.batch_size / self.num_models),
-                                -1,
-                            )
-
-                            igrad_t_m_b_n = self.state_i_grad[l].reshape(
-                                self.term_length,
-                                self.num_models,
-                                int(self.batch_size / self.num_models),
-                                -1,
-                            )
-                            igrad_m_t_b_n = igrad_t_m_b_n.permute(1, 0, 2, 3)
-                            igrad_m_tb_n = igrad_m_t_b_n.reshape(
-                                self.num_models,
-                                self.term_length
-                                * int(self.batch_size / self.num_models),
-                                -1,
-                            )
-                            igrad_m_n_tb = igrad_m_tb_n.permute(0, 2, 1)
-
-                            self.weight_grad[l] = (
-                                torch.bmm(igrad_m_n_tb, hidden_m_tb_n) * self.beta_i
+                            no_spike_dw = (  # model x fan_out x 1
+                                no_spike
+                                .mean(dim=1)  # model x batch x fan_out
+                                .reshape(self.num_models, -1, 1)
                             )
                         else:
-                            self.weight_grad[l] = (
-                                torch.mm(
-                                    self.state_i_grad[l]
-                                    .reshape(-1, self.state_i_grad[l].shape[-1])
-                                    .t(),
-                                    hidden_s_all.reshape(-1, hidden_s_all.shape[-1]),
-                                )
-                                * self.beta_i
-                            )
+                            # batch x fan_out ; fan_out x 1
+                            no_spike_dw = no_spike.mean(dim=0).reshape(-1, 1)
 
-                        if is_timing:
-                            if self.multi_model:
-                                fan_in = self.weight_grad[l].shape[2]
-                                timing_penalty_coeff = self.timing_penalty / fan_in
-                                no_spike = (
-                                    1
-                                    - (
-                                        torch.stack(self.state_s[l]).sum(dim=0) > 0
-                                    ).float()
-                                )
-                                # model_batch x fan_out
-                                no_spike = no_spike.reshape(
-                                    self.num_models,
-                                    int(self.batch_size / self.num_models),
-                                    -1,
-                                )
-                                # model x batch x fan_out
-                                no_spike_dw = timing_penalty_coeff * no_spike.mean(
-                                    dim=1
-                                ).reshape(self.num_models, -1, 1)
-                                # model x fan_out x 1
-                                self.weight_grad[l] -= no_spike_dw
-                            else:
-                                fan_in = self.weight_grad[l].shape[1]
-                                timing_penalty_coeff = self.timing_penalty / fan_in
-                                no_spike = (
-                                    1
-                                    - (
-                                        torch.stack(self.state_s[l]).sum(dim=0) > 0
-                                    ).float()
-                                )
-                                # batch x fan_out
-                                no_spike_dw = timing_penalty_coeff * no_spike.mean(
-                                    dim=0
-                                ).reshape(-1, 1)
-                                # fan_out x 1
-                                self.weight_grad[l] -= no_spike_dw
-                        if torch.isnan(self.weight_grad[l]).any():
-                            self.weight_grad[l][torch.isnan(self.weight_grad[l])] = 0
-                            logging.warning("nan found and replaced with 0")
+                        no_spike_dw *= timing_penalty_coeff
+                        self.weight_grad[l] -= no_spike_dw
 
-                        if self.multi_model:
-                            vgrad_t_m_b_n = v_dep_grad.reshape(
-                                self.term_length,
-                                self.num_models,
-                                int(self.batch_size / self.num_models),
-                                -1,
-                            )
-                            vgrad_m_n = vgrad_t_m_b_n.sum(0).sum(1) * self.beta_bias
-                            self.bias_grad[l] = vgrad_m_n
-                        else:
-                            self.bias_grad[l] = (
-                                v_dep_grad.sum(0).sum(0) * self.beta_bias
-                            )
+                    if torch.isnan(self.weight_grad[l]).any():
+                        self.weight_grad[l][torch.isnan(self.weight_grad[l])] = 0
+                        logging.warning("nan found and replaced with 0")
 
-                    ### Calc weight grad for conv layer.
-                    elif self.fmap_type_list[l] == "conv":
-
-                        no_mm_support("conv")  # no multi-model support
-
-                        weight_shape = self.layers[l].weight.shape
-                        hidden_s_all_rs = hidden_s_all.reshape(
-                            -1, *list(hidden_s_all.shape[2:])
+                    if self.multi_model:
+                        vgrad_t_m_b_n = v_dep_grad.reshape(
+                            self.term_length,
+                            self.num_models,
+                            int(self.batch_size / self.num_models),
+                            -1,
                         )
-                        i_grad_rs = self.state_i_grad[l].reshape(
-                            -1, *list(self.state_i_grad[l].shape[2:])
-                        )
-                        padding = self.layers[l].padding
-                        self.weight_grad[l] = torch.nn.grad.conv2d_weight(
-                            hidden_s_all_rs,
-                            self.layers[l].weight.shape,
-                            i_grad_rs,
-                            padding=padding,
-                        )
-                        if torch.isnan(self.weight_grad[l]).any():
-                            pdb.set_trace()
-                            self.weight_grad[l][torch.isnan(self.weight_grad[l])] = 0
-                            logging.warning("nan found and replaced with 0")
-
+                        vgrad_m_n = vgrad_t_m_b_n.sum(0).sum(1) * self.beta_bias
+                        self.bias_grad[l] = vgrad_m_n
+                    else:
                         self.bias_grad[l] = (
-                            v_dep_grad.sum(dim=[0, 1, 3, 4]) * self.beta_bias
+                            v_dep_grad.sum(0).sum(0) * self.beta_bias
                         )
+
+                ### Calc weight grad for conv layer.
+                elif self.fmap_type_list[l] == "conv":
+
+                    self.no_mm_support("conv")  # no multi-model support
+
+                    hidden_s_all_rs = hidden_s_all.reshape(
+                        -1, *list(hidden_s_all.shape[2:])
+                    )
+                    i_grad_rs = self.state_i_grad[l].reshape(
+                        -1, *list(self.state_i_grad[l].shape[2:])
+                    )
+                    padding = self.layers[l].padding
+                    self.weight_grad[l] = torch.nn.grad.conv2d_weight(
+                        hidden_s_all_rs,
+                        self.layers[l].weight.shape,
+                        i_grad_rs,
+                        padding=padding,
+                    )
+                    if torch.isnan(self.weight_grad[l]).any():
+                        pdb.set_trace()
+                        self.weight_grad[l][torch.isnan(self.weight_grad[l])] = 0
+                        logging.warning("nan found and replaced with 0")
+
+                    self.bias_grad[l] = (
+                        v_dep_grad.sum(dim=[0, 1, 3, 4]) * self.beta_bias
+                    )
 
     def act(self, input):
         """Activation function."""
