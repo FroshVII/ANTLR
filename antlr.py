@@ -84,6 +84,16 @@ class ListSNNMulti(nn.Module):
                 "multi-models"
             )
 
+    def exists_and_true(self, attr_key):
+        """Return the value of an attribute if it's set, else False."""
+        if hasattr(self, attr_key):
+            attr_val = getattr(self, attr_key)
+            if type(attr_val) != bool:
+                logging.warning(f"{attr_key} is not a boolean")
+            return attr_val
+        else:
+            return False
+
     # ======= ======= =======
     # Initialization
     # ======= ======= ====
@@ -95,7 +105,7 @@ class ListSNNMulti(nn.Module):
         if self.target_type not in self.VALID_TARGETS:
             raise ValueError(
                 f"invalid target type '{self.target_type}', "
-                + f"valid types are {VALID_TARGETS}"
+                + f"valid types are {self.VALID_TARGETS}"
             )
 
         # Code offers support for three different types of loss
@@ -380,7 +390,7 @@ class ListSNNMulti(nn.Module):
             init.constant_(state_v_bs, 0)
 
             # Perform normal weight initialization if enabled
-            if hasattr(self, "normal_weight_init") and self.normal_weight_init:
+            if self.exists_and_true("normal_weight_init"):
                 init.normal_(layer.weight, mean=0, std=self.weight_init_std)
 
             # Add weight bias if specified
@@ -417,21 +427,17 @@ class ListSNNMulti(nn.Module):
 
             if self.target_type == "latency":
                 if self.multi_model:
-                    self.output_s_cum = torch.zeros(
-                        self.num_models * input.shape[1],
-                        self.fmap_shape_list[-1][0]
-                    )
+                    dim1 = self.num_models * input.shape[1]
                 else:
-                    self.output_s_cum = torch.zeros(
-                        input.shape[0], self.fmap_shape_list[-1][0]
-                    )
+                    dim1 = input.shape[0]
+                dim2 = self.fmap_shape_list[-1][0]
+                self.output_s_cum = torch.zeros(dim1, dim2)
 
             self.state_i = list()
             self.state_v = list()
             self.state_v_prime = list()
             self.state_s = list()
             for l, layers in enumerate(self.layers):
-                layer = layers[0] if self.multi_model else layers
                 self.state_i.append(list())
                 self.state_v.append(list())
                 self.state_v_prime.append(list())
@@ -444,7 +450,6 @@ class ListSNNMulti(nn.Module):
 
             # Merge parameters
             if self.multi_model:
-
                 # Compile weights
                 self.weight_list = []
                 for layer_list in self.layers:
