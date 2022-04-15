@@ -63,6 +63,13 @@ class ListSNNMulti(nn.Module):
     """Simple spiking neural network (SNN) model without SNNCell"""
 
     # ======= ======= =======
+    # Class Variables
+    # ======= ======= ====
+
+    # Loss targets supported by the model implementation
+    VALID_TARGETS = ["count", "train", "latency"]
+
+    # ======= ======= =======
     # Utilities
     # ======= ======= ====
 
@@ -85,8 +92,7 @@ class ListSNNMulti(nn.Module):
         """Initialize kernels as attributes."""
 
         # Make sure a valid target type is selected
-        VALID_TARGETS = ["train", "count", "latency"]
-        if self.target_type not in VALID_TARGETS:
+        if self.target_type not in self.VALID_TARGETS:
             raise ValueError(
                 f"invalid target type '{self.target_type}', "
                 + f"valid types are {VALID_TARGETS}"
