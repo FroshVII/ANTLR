@@ -1368,7 +1368,7 @@ class ListSNNMulti(nn.Module):
         l = layer
         with torch.no_grad():
 
-            # If this is *not* the final timestep...
+            # If this is not the final timestep...
             if time != self.term_length - 1:  # zero-indexed
 
                 # X <-  (1 - S[t]) * -(-0.5 * dV[t + 1])
@@ -1392,7 +1392,7 @@ class ListSNNMulti(nn.Module):
                     * self.state_v_grad_epr_ef2[l + 1][t + 1]
                 )
 
-            # If this *is* the final timestep...
+            # If this is the final timestep...
             else:
 
                 # X <-  0
