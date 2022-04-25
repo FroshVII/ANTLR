@@ -7,6 +7,7 @@ import torch.optim
 # internal ----
 from antlr import *
 
+
 class Trainer:
 
     # ======= ======= =======
@@ -89,7 +90,8 @@ class Trainer:
     # ======= ======= ====
 
     def spikes2label(self, spmat, decision_type="count"):
-        """
+        """Convert spike data to a categorical class label.
+
         Args
             spmat : [batch x time x feature]
         Return
@@ -107,9 +109,11 @@ class Trainer:
         return label
 
     def label2spikes(self, label):
-        """
-        Generate target spike train based on the class label.
-        Target spikes are evenly distributed according to the target spike number.
+        """Generate target spike train based on the class label.
+
+        Target spikes are evenly distributed according to the target
+        spike number.
+
         Args:
             label : target label. shape = [batch]
         Return:
@@ -506,9 +510,7 @@ class Trainer:
                 ]
                 self.min_first_stime_min = [
                     min(x, y)
-                    for x, y in zip(
-                        self.min_first_stime_min, first_stime_min
-                    )
+                    for x, y in zip(self.min_first_stime_min, first_stime_min)
                 ]
                 self.mean_first_stime_mean = (
                     (
@@ -575,8 +577,8 @@ class Trainer:
 
         # Report summary statistics
         report = (
-            (total_loss / progress),           # loss per trial
-            (total_correct / progress),        # correct per trial
+            (total_loss / progress),  # loss per trial
+            (total_correct / progress),  # correct per trial
             (total_correct_first / progress),  #
         )
         if mode == "train":

@@ -1,17 +1,22 @@
-import torch
+"""ANTLR code for Kim et al, 2020."""
+
+# external ----
+from pathlib import Path
+
+import argparse
+import copy
 import matplotlib.pyplot as plt
+import mnist_dataset
+import nmnist_dataset
 import os
 import sys
 import time
-from pathlib import Path
-import argparse
-import copy
+import torch
+import utils
 
+# internal ----
 from antlr import *
 from trainer import *
-import utils
-import mnist_dataset
-import nmnist_dataset
 
 
 parser = argparse.ArgumentParser(
@@ -176,16 +181,14 @@ model_args.add_argument(
     type=float,
     default=0.99,
     metavar="F",
-    help="alpha_i used for decaying current\
-                        (default: 0.99)",
+    help="alpha_i used for decaying current (default: 0.99)",
 )
 model_args.add_argument(
     "--alpha-v",
     type=float,
     default=0.99,
     metavar="F",
-    help="alpha_v used for decaying voltage\
-                        (default: 0.99)",
+    help="alpha_v used for decaying voltage (default: 0.99)",
 )
 model_args.add_argument(
     "--beta-i",
@@ -213,16 +216,14 @@ model_args.add_argument(
     type=float,
     default=1.0,
     metavar="F",
-    help="surr_alpha used for surrogate derivative \
-                        (default: 1.0)",
+    help="surr_alpha used for surrogate derivative (default: 1.0)",
 )
 model_args.add_argument(
     "--surr-beta",
     type=float,
     default=3.0,
     metavar="F",
-    help="surr_beta used for surrogate derivative \
-                        (default: 3.0)",
+    help="surr_beta used for surrogate derivative (default: 3.0)",
 )
 model_args.add_argument(
     "-l",
