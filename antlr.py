@@ -738,7 +738,9 @@ class ListSNNMulti(nn.Module):
             self.output : [batch x time x feature]
             times : [batch]
         """
-        decreasing_output = torch.arange(self.term_length, 0, -1).view(1, -1, 1) * self.output
+        decreasing_output = torch.arange(self.term_length, 0, -1)
+        decreasing_output = decreasing_output.view(1, -1, 1) * self.output
+
         max_each_neuron = decreasing_output.max(dim=1).values
         # batch x feature
         max_whole_network = max_each_neuron.max(dim=1).values
@@ -763,27 +765,28 @@ class ListSNNMulti(nn.Module):
         num_spike_total = []
         for l, layers in enumerate(self.layers):
             layer = layers[0] if self.multi_model else layers
-            if is_conv2d_or_linear(layer):
-                if self.multi_model:
-                    num_spike_total_each_model = (
-                        torch.stack(self.state_s[l])
-                        .permute(1, 0, 2)
-                        .reshape(
-                            self.num_models,
-                            int(self.output.shape[0] / self.num_models),
-                            self.term_length,
-                            -1,
-                        )
-                        .sum(1)
-                        .sum(1)
-                        .sum(1)
-                        .int()
+            if not is_conv2d_or_linear(layer):
+                continue
+            if self.multi_model:
+                num_spike_total_each_model = (
+                    torch.stack(self.state_s[l])
+                    .permute(1, 0, 2)
+                    .reshape(
+                        self.num_models,
+                        int(self.output.shape[0] / self.num_models),
+                        self.term_length,
+                        -1,
                     )
-                    num_spike_total.append(num_spike_total_each_model)
-                else:
-                    num_spike_total.append(
-                        int(torch.stack(self.state_s[l]).sum().item())
-                    )
+                    .sum(1)
+                    .sum(1)
+                    .sum(1)
+                    .int()
+                )
+                num_spike_total.append(num_spike_total_each_model)
+            else:
+                num_spike_total.append(
+                    int(torch.stack(self.state_s[l]).sum().item())
+                )
         if self.multi_model:
             num_spike_total = torch.stack(num_spike_total).t().tolist()
         self.num_spike_total = num_spike_total
@@ -792,22 +795,23 @@ class ListSNNMulti(nn.Module):
         num_spike_nec = []
         for l, layers in enumerate(self.layers):
             layer = layers[0] if self.multi_model else layers
-            if is_conv2d_or_linear(layer):
-                num_spike_nec_each_batch = torch.tensor(
-                    [
-                        torch.stack(self.state_s[l])
-                        .int()[: (first_stime[b] + 1), b]
-                        .sum()
-                        .item()
-                        for b in range(self.output.shape[0])
-                    ]
+            if not is_conv2d_or_linear(layer):
+                continue
+            num_spike_nec_each_batch = torch.tensor(
+                [
+                    torch.stack(self.state_s[l])
+                    .int()[: (first_stime[b] + 1), b]
+                    .sum()
+                    .item()
+                    for b in range(self.output.shape[0])
+                ]
+            )
+            if self.multi_model:
+                num_spike_nec.append(
+                    num_spike_nec_each_batch.reshape(self.num_models, -1).sum(1)
                 )
-                if self.multi_model:
-                    num_spike_nec.append(
-                        num_spike_nec_each_batch.reshape(self.num_models, -1).sum(1)
-                    )
-                else:
-                    num_spike_nec.append(num_spike_nec_each_batch.sum().item())
+            else:
+                num_spike_nec.append(num_spike_nec_each_batch.sum().item())
         if self.multi_model:
             num_spike_nec = torch.stack(num_spike_nec).t().tolist()
         self.num_spike_nec = num_spike_nec
@@ -955,6 +959,8 @@ class ListSNNMulti(nn.Module):
             )
             # time x batch x neuron
             return
+
+            "once I failed I lost the fear of failure as a motivator" #[!]
 
         # Case 2: train or count target
         if self.target_type == "train":
